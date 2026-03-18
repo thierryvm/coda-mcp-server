@@ -729,10 +729,24 @@ Returns: List of formulas with id, name, and value.`,
       const items = data.items as Array<Record<string, unknown>>;
       if (!items.length) return { content: [{ type: "text", text: "Aucune formule trouvée." }] };
 
+      // Fetch each formula individually to get the computed value
+      const formulas: Array<Record<string, unknown>> = await Promise.all(
+        items.map(async (f) => {
+          try {
+            const detail = await codaRequest<Record<string, unknown>>(
+              `/docs/${doc_id}/formulas/${f["id"]}`
+            );
+            return { ...f, value: detail["value"] } as Record<string, unknown>;
+          } catch {
+            return { ...f, value: undefined } as Record<string, unknown>;
+          }
+        })
+      );
+
       const text = response_format === ResponseFormat.JSON
-        ? JSON.stringify(items, null, 2)
+        ? JSON.stringify(formulas, null, 2)
         : [`# Formules du doc \`${doc_id}\``, "",
-            ...items.map(f => `- **${f["name"]}** \`${f["id"]}\` = ${JSON.stringify(f["value"])}`)
+            ...formulas.map(f => `- **${f["name"]}** \`${f["id"]}\` = ${f["value"] !== undefined ? JSON.stringify(f["value"]) : "—"}`)
           ].join("\n");
       return { content: [{ type: "text", text: truncate(text) }] };
     } catch (e) {
