@@ -1,11 +1,11 @@
 {
-  "name": "coda-mcp-server",
+  "name": "@thierryvm/coda-mcp-server",
   "version": "2.0.0",
   "description": "MCP server for Coda.io API — list/read/write docs, pages, tables, rows and formulas",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "coda-mcp-server": "./dist/index.js"
+    "coda-mcp-server": "dist/index.js"
   },
   "files": [
     "dist",
@@ -33,7 +33,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/thierryvm/coda-mcp-server.git"
+    "url": "git+https://github.com/thierryvm/coda-mcp-server.git"
   },
   "homepage": "https://github.com/thierryvm/coda-mcp-server#readme",
   "dependencies": {
