@@ -794,6 +794,287 @@ Returns: Matching docs with id, name, browserLink.`,
   }
 );
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAGE CONTENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CODA_DOMAIN = "https://coda.io";
+const MAX_CONTENT_LENGTH = 100_000; // 100KB max pour les écritures
+
+/** Sécurité : vérifie que l'URL appartient bien à coda.io */
+function assertCodaUrl(url: string): void {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch {
+    throw new Error("URL invalide.");
+  }
+  if (parsed.protocol !== "https:" || !parsed.hostname.endsWith("coda.io")) {
+    throw new Error("URL non autorisée : seules les URLs coda.io sont acceptées.");
+  }
+}
+
+/** Exporte le contenu d'une page en markdown via l'API Coda (polling) */
+async function fetchPageContentAsMarkdown(doc_id: string, page_id: string): Promise<string> {
+  // 1. Déclencher l'export
+  const beginData = await codaRequest<{ id: string }>(
+    `/docs/${doc_id}/pages/${page_id}/export`,
+    "POST",
+    { outputFormat: "markdown" }
+  );
+  const requestId = beginData.id;
+
+  // 2. Polling (max 10 tentatives, 3s d'intervalle)
+  const maxRetries = 10;
+  for (let i = 0; i < maxRetries; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const status = await codaRequest<{ status: string; downloadLink?: string }>(
+      `/docs/${doc_id}/pages/${page_id}/export/${requestId}`
+    );
+    if (status.status === "complete" && status.downloadLink) {
+      // 3. Sécurité : valider que le lien de téléchargement est bien sur coda.io
+      assertCodaUrl(status.downloadLink);
+      const resp = await axios.get<string>(status.downloadLink, { responseType: "text", timeout: 15000 });
+      return resp.data;
+    }
+    if (status.status === "failed") throw new Error("L'export de la page a échoué.");
+  }
+  throw new Error("Timeout : l'export n'a pas abouti après 30 secondes.");
+}
+
+server.registerTool(
+  "coda_get_page_content",
+  {
+    title: "Get Page Content",
+    description: "Récupère le contenu complet d'une page Coda au format markdown.",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      page_id: z.string().min(1).describe("ID ou nom de la page"),
+    }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  async ({ doc_id, page_id }) => {
+    try {
+      const content = await fetchPageContentAsMarkdown(doc_id, page_id);
+      return { content: [{ type: "text", text: truncate(content) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_peek_page",
+  {
+    title: "Peek Page",
+    description: "Aperçu des premières lignes d'une page Coda (évite de charger tout le contenu).",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      page_id: z.string().min(1).describe("ID ou nom de la page"),
+      num_lines: z.number().int().min(1).max(200).default(30).describe("Nombre de lignes à retourner (défaut 30)"),
+    }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  async ({ doc_id, page_id, num_lines }) => {
+    try {
+      const content = await fetchPageContentAsMarkdown(doc_id, page_id);
+      const preview = content.split(/\r?\n/).slice(0, num_lines).join("\n");
+      return { content: [{ type: "text", text: preview }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_create_page",
+  {
+    title: "Create Page",
+    description: "Crée une nouvelle page dans un document Coda, avec contenu markdown optionnel.",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      name: z.string().min(1).max(256).describe("Nom de la page"),
+      content: z.string().max(MAX_CONTENT_LENGTH).optional().describe("Contenu markdown initial (optionnel)"),
+      parent_page_id: z.string().optional().describe("ID de la page parente pour créer une sous-page (optionnel)"),
+    }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  async ({ doc_id, name, content, parent_page_id }) => {
+    try {
+      const body: Record<string, unknown> = { name };
+      if (parent_page_id) body["parentPageId"] = parent_page_id;
+      if (content) body["pageContent"] = { type: "canvas", canvasContent: { format: "markdown", content } };
+      const result = await codaRequest<Record<string, unknown>>(`/docs/${doc_id}/pages`, "POST", body);
+      return {
+        content: [{ type: "text", text: `✅ Page créée !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}\n- **Lien**: ${result["browserLink"] ?? "—"}` }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_replace_page_content",
+  {
+    title: "Replace Page Content",
+    description: "Remplace entièrement le contenu d'une page par du markdown. ATTENTION : action irréversible.",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      page_id: z.string().min(1).describe("ID ou nom de la page"),
+      content: z.string().min(1).max(MAX_CONTENT_LENGTH).describe("Nouveau contenu markdown"),
+    }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  async ({ doc_id, page_id, content }) => {
+    try {
+      await codaRequest(`/docs/${doc_id}/pages/${page_id}`, "PUT", {
+        contentUpdate: { insertionMode: "replace", canvasContent: { format: "markdown", content } },
+      });
+      return { content: [{ type: "text", text: `✅ Contenu de la page \`${page_id}\` remplacé.` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_append_page_content",
+  {
+    title: "Append Page Content",
+    description: "Ajoute du contenu markdown à la fin d'une page Coda.",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      page_id: z.string().min(1).describe("ID ou nom de la page"),
+      content: z.string().min(1).max(MAX_CONTENT_LENGTH).describe("Contenu markdown à ajouter"),
+    }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  async ({ doc_id, page_id, content }) => {
+    try {
+      await codaRequest(`/docs/${doc_id}/pages/${page_id}`, "PUT", {
+        contentUpdate: { insertionMode: "append", canvasContent: { format: "markdown", content } },
+      });
+      return { content: [{ type: "text", text: `✅ Contenu ajouté à la page \`${page_id}\`.` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_duplicate_page",
+  {
+    title: "Duplicate Page",
+    description: "Duplique une page existante sous un nouveau nom.",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      page_id: z.string().min(1).describe("ID ou nom de la page à dupliquer"),
+      new_name: z.string().min(1).max(256).describe("Nom de la nouvelle page"),
+    }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  async ({ doc_id, page_id, new_name }) => {
+    try {
+      const content = await fetchPageContentAsMarkdown(doc_id, page_id);
+      const result = await codaRequest<Record<string, unknown>>(`/docs/${doc_id}/pages`, "POST", {
+        name: new_name,
+        pageContent: { type: "canvas", canvasContent: { format: "markdown", content } },
+      });
+      return {
+        content: [{ type: "text", text: `✅ Page dupliquée !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}` }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_resolve_link",
+  {
+    title: "Resolve Coda Link",
+    description: "Résout une URL Coda (browserLink) en métadonnées : type d'objet, ID doc, ID page, etc.",
+    inputSchema: z.object({
+      url: z.string().url().describe("URL Coda à résoudre (ex: https://coda.io/d/...)"),
+    }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  async ({ url }) => {
+    try {
+      // Sécurité : seules les URLs coda.io sont autorisées
+      assertCodaUrl(url);
+      const data = await codaRequest<Record<string, unknown>>(
+        "/resolveBrowserLink", "GET", undefined, { url }
+      );
+      const text = [
+        `# Résolution de lien Coda`,
+        `- **Type**: ${data["type"] ?? "—"}`,
+        `- **ID**: \`${data["id"] ?? "—"}\``,
+        `- **Nom**: ${data["name"] ?? "—"}`,
+        `- **browserLink**: ${data["browserLink"] ?? "—"}`,
+      ].join("\n");
+      return { content: [{ type: "text", text: text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_delete_rows",
+  {
+    title: "Delete Multiple Rows",
+    description: "Supprime plusieurs lignes d'une table en une seule opération. Action irréversible.",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      table_id: z.string().min(1).describe("ID ou nom de la table"),
+      row_ids: z.array(z.string().min(1)).min(1).max(100).describe("Liste des IDs de lignes à supprimer (max 100)"),
+    }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  async ({ doc_id, table_id, row_ids }) => {
+    try {
+      const result = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/tables/${table_id}/rows`,
+        "DELETE",
+        { rowIds: row_ids }
+      );
+      return {
+        content: [{ type: "text", text: `✅ ${row_ids.length} ligne(s) supprimée(s).\n- **Request ID**: ${result["requestId"] ?? "—"}` }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_push_button",
+  {
+    title: "Push Button",
+    description: "Déclenche un bouton Coda sur une ligne spécifique d'une table.",
+    inputSchema: z.object({
+      doc_id: z.string().min(1).describe("ID du document"),
+      table_id: z.string().min(1).describe("ID ou nom de la table"),
+      row_id: z.string().min(1).describe("ID ou nom de la ligne"),
+      column_id: z.string().min(1).describe("ID ou nom de la colonne bouton"),
+    }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  async ({ doc_id, table_id, row_id, column_id }) => {
+    try {
+      const result = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/tables/${table_id}/rows/${row_id}/buttons/${column_id}`,
+        "POST"
+      );
+      return {
+        content: [{ type: "text", text: `✅ Bouton déclenché.\n- **Request ID**: ${result["requestId"] ?? "—"}` }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
