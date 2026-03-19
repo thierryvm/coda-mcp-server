@@ -1,6 +1,11 @@
 node_modules/
 dist/
 .env
+.env.*
 npm_err.txt
 npm_out.txt
 *.local
+*.pem
+*.key
+secrets.*
+config.local.*
