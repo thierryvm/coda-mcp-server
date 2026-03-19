@@ -108,7 +108,7 @@ Aucune installation requise. Ajoutez directement dans votre config :
 
 **Claude Code :**
 ```bash
-claude mcp add coda npx -y coda-mcp-server@latest \
+claude mcp add coda npx -y @thierryvm/coda-mcp-server@latest \
   --env CODA_API_TOKEN=VOTRE_TOKEN_ICI \
   -s user
 ```
@@ -119,7 +119,7 @@ claude mcp add coda npx -y coda-mcp-server@latest \
   "mcpServers": {
     "coda": {
       "command": "npx",
-      "args": ["-y", "coda-mcp-server@latest"],
+      "args": ["-y", "@thierryvm/coda-mcp-server@latest"],
       "env": {
         "CODA_API_TOKEN": "VOTRE_TOKEN_ICI"
       }
@@ -218,7 +218,7 @@ Une fois configuré, voici ce que vous pouvez demander à Claude :
 
 ## Mise à jour
 
-**Via npx :** automatique à chaque utilisation (`@latest`).
+**Via npx :** automatique à chaque utilisation (`@thierryvm/coda-mcp-server@latest`).
 
 **Via clone git :**
 ```bash
