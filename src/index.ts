@@ -10,13 +10,13 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import axios, { AxiosError } from "axios";
+import axios from "axios";
 import { z } from "zod";
+import { truncate, handleApiError } from "./utils.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const API_BASE_URL = "https://coda.io/apis/v1";
-const CHARACTER_LIMIT = 25000;
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
@@ -46,38 +46,12 @@ async function codaRequest<T>(
     params,
     timeout: 30000,
     headers: {
-      "Authorization": `Bearer ${getApiToken()}`,
+      Authorization: `Bearer ${getApiToken()}`,
       "Content-Type": "application/json",
-      "Accept": "application/json",
+      Accept: "application/json",
     },
   });
   return response.data as T;
-}
-
-// ─── Error Handling ───────────────────────────────────────────────────────────
-
-function handleApiError(error: unknown): string {
-  if (error instanceof AxiosError) {
-    if (error.response) {
-      const status = error.response.status;
-      const msg = (error.response.data as { message?: string })?.message ?? "";
-      switch (status) {
-        case 401: return "Error: Unauthorized. Check your CODA_API_TOKEN.";
-        case 403: return `Error: Forbidden. You don't have access to this resource. ${msg}`;
-        case 404: return `Error: Not found. Check the doc/table/row ID. ${msg}`;
-        case 429: return "Error: Rate limit exceeded. Wait a few seconds before retrying.";
-        default:  return `Error: API request failed (${status}). ${msg}`;
-      }
-    }
-    if (error.code === "ECONNABORTED") return "Error: Request timed out. Try again.";
-  }
-  return `Error: ${error instanceof Error ? error.message : String(error)}`;
-}
-
-function truncate(text: string): string {
-  if (text.length <= CHARACTER_LIMIT) return text;
-  return text.slice(0, CHARACTER_LIMIT) +
-    `\n\n⚠️ Response truncated (${text.length} chars). Use pagination (limit/pageToken) to see more.`;
 }
 
 // ─── Shared Zod fragments ─────────────────────────────────────────────────────
@@ -87,10 +61,17 @@ const responseFormatField = z
   .default(ResponseFormat.MARKDOWN)
   .describe("Output format: 'markdown' for human-readable, 'json' for machine-readable");
 
-const limitField = z.number().int().min(1).max(500).default(25)
+const limitField = z
+  .number()
+  .int()
+  .min(1)
+  .max(500)
+  .default(25)
   .describe("Max items to return (1–500, default 25)");
 
-const pageTokenField = z.string().optional()
+const pageTokenField = z
+  .string()
+  .optional()
   .describe("Token for next page of results (from previous response)");
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -119,13 +100,20 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: List of docs with id, name, owner, createdAt, updatedAt, browserLink.`,
-    inputSchema: z.object({
-      query: z.string().optional().describe("Search keyword in doc title"),
-      limit: limitField,
-      page_token: pageTokenField,
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        query: z.string().optional().describe("Search keyword in doc title"),
+        limit: limitField,
+        page_token: pageTokenField,
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ query, limit, page_token, response_format }) => {
     try {
@@ -143,7 +131,8 @@ Returns: List of docs with id, name, owner, createdAt, updatedAt, browserLink.`,
         text = JSON.stringify({ items, nextPageToken: data.nextPageToken }, null, 2);
       } else {
         const lines = [`# Coda Docs (${items.length} shown)`, ""];
-        if (data.nextPageToken) lines.push(`> ⚠️ More results available. Use page_token: \`${data.nextPageToken}\``, "");
+        if (data.nextPageToken)
+          lines.push(`> ⚠️ More results available. Use page_token: \`${data.nextPageToken}\``, "");
         for (const doc of items) {
           lines.push(`## ${doc["name"]} \`${doc["id"]}\``);
           lines.push(`- **Propriétaire**: ${(doc["owner"] as string) ?? "—"}`);
@@ -171,25 +160,33 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: Doc metadata including name, owner, pages count, browserLink.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, response_format }) => {
     try {
       const doc = await codaRequest<Record<string, unknown>>(`/docs/${doc_id}`);
-      const text = response_format === ResponseFormat.JSON
-        ? JSON.stringify(doc, null, 2)
-        : [
-            `# ${doc["name"]}`,
-            `- **ID**: \`${doc["id"]}\``,
-            `- **Propriétaire**: ${doc["owner"] ?? "—"}`,
-            `- **Créé**: ${doc["createdAt"] ?? "—"}`,
-            `- **Mis à jour**: ${doc["updatedAt"] ?? "—"}`,
-            `- **Lien**: ${doc["browserLink"] ?? "—"}`,
-          ].join("\n");
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(doc, null, 2)
+          : [
+              `# ${doc["name"]}`,
+              `- **ID**: \`${doc["id"]}\``,
+              `- **Propriétaire**: ${doc["owner"] ?? "—"}`,
+              `- **Créé**: ${doc["createdAt"] ?? "—"}`,
+              `- **Mis à jour**: ${doc["updatedAt"] ?? "—"}`,
+              `- **Lien**: ${doc["browserLink"] ?? "—"}`,
+            ].join("\n");
       return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -208,11 +205,18 @@ Args:
   - source_doc (string, optional): ID of a doc to duplicate as template
 
 Returns: New doc ID, name, and browserLink.`,
-    inputSchema: z.object({
-      title: z.string().min(1).max(256).describe("Title for the new document"),
-      source_doc: z.string().optional().describe("Optional doc ID to duplicate"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: z
+      .object({
+        title: z.string().min(1).max(256).describe("Title for the new document"),
+        source_doc: z.string().optional().describe("Optional doc ID to duplicate"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ title, source_doc }) => {
     try {
@@ -220,10 +224,12 @@ Returns: New doc ID, name, and browserLink.`,
       if (source_doc) payload["sourceDoc"] = source_doc;
       const doc = await codaRequest<Record<string, unknown>>("/docs", "POST", payload);
       return {
-        content: [{
-          type: "text",
-          text: `✅ Doc créé !\n- **ID**: \`${doc["id"]}\`\n- **Titre**: ${doc["name"]}\n- **Lien**: ${doc["browserLink"]}`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Doc créé !\n- **ID**: \`${doc["id"]}\`\n- **Titre**: ${doc["name"]}\n- **Lien**: ${doc["browserLink"]}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -248,13 +254,20 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: List of pages with id, name, type, browserLink.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      limit: limitField,
-      page_token: pageTokenField,
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        limit: limitField,
+        page_token: pageTokenField,
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, limit, page_token, response_format }) => {
     try {
@@ -265,14 +278,16 @@ Returns: List of pages with id, name, type, browserLink.`,
         { limit, pageToken: page_token }
       );
       const items = data.items as Array<Record<string, unknown>>;
-      if (!items.length) return { content: [{ type: "text", text: "Aucune page trouvée dans ce doc." }] };
+      if (!items.length)
+        return { content: [{ type: "text", text: "Aucune page trouvée dans ce doc." }] };
 
       let text: string;
       if (response_format === ResponseFormat.JSON) {
         text = JSON.stringify({ items, nextPageToken: data.nextPageToken }, null, 2);
       } else {
         const lines = [`# Pages du doc \`${doc_id}\` (${items.length} affichées)`, ""];
-        if (data.nextPageToken) lines.push(`> Plus de résultats. page_token: \`${data.nextPageToken}\``, "");
+        if (data.nextPageToken)
+          lines.push(`> Plus de résultats. page_token: \`${data.nextPageToken}\``, "");
         for (const p of items) {
           lines.push(`## ${p["name"]} \`${p["id"]}\``);
           lines.push(`- **Type**: ${p["type"] ?? "page"}`);
@@ -303,15 +318,22 @@ Args:
   - image_url (string, optional): Cover image URL
 
 Returns: Confirmation with updated page info.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      page_id: z.string().min(1).describe("Page ID or name"),
-      name: z.string().optional().describe("New page title"),
-      subtitle: z.string().optional().describe("New subtitle"),
-      icon_name: z.string().optional().describe("Emoji icon name"),
-      image_url: z.string().url().optional().describe("Cover image URL"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        page_id: z.string().min(1).describe("Page ID or name"),
+        name: z.string().optional().describe("New page title"),
+        subtitle: z.string().optional().describe("New subtitle"),
+        icon_name: z.string().optional().describe("Emoji icon name"),
+        image_url: z.string().url().optional().describe("Cover image URL"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, page_id, name, subtitle, icon_name, image_url }) => {
     try {
@@ -321,13 +343,57 @@ Returns: Confirmation with updated page info.`,
       if (icon_name) payload["iconName"] = icon_name;
       if (image_url) payload["imageUrl"] = image_url;
       const result = await codaRequest<Record<string, unknown>>(
-        `/docs/${doc_id}/pages/${page_id}`, "PUT", payload
+        `/docs/${doc_id}/pages/${page_id}`,
+        "PUT",
+        payload
       );
       return {
-        content: [{
-          type: "text",
-          text: `✅ Page mise à jour !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Page mise à jour !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}`,
+          },
+        ],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_rename_page",
+  {
+    title: "Rename Page",
+    description: "Renomme une page existante. Raccourci explicite pour changer uniquement le nom.",
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        page_id: z.string().min(1).describe("ID ou nom de la page"),
+        new_name: z.string().min(1).max(256).describe("Nouveau nom de la page"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, page_id, new_name }) => {
+    try {
+      const result = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/pages/${page_id}`,
+        "PUT",
+        { name: new_name }
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: `✅ Page renommée !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -353,14 +419,21 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: List of tables with id, name, type, rowCount, browserLink.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      table_type: z.enum(["table", "view"]).optional().describe("Filter: 'table' or 'view'"),
-      limit: limitField,
-      page_token: pageTokenField,
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_type: z.enum(["table", "view"]).optional().describe("Filter: 'table' or 'view'"),
+        limit: limitField,
+        page_token: pageTokenField,
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_type, limit, page_token, response_format }) => {
     try {
@@ -409,12 +482,19 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: List of columns with id, name, type, format.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      table_id: z.string().min(1).describe("Table ID or name"),
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Table ID or name"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_id, response_format }) => {
     try {
@@ -463,20 +543,38 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: List of rows with their values keyed by column name.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      table_id: z.string().min(1).describe("Table ID or name"),
-      query: z.string().optional().describe("Filter rows: 'columnId:value'"),
-      sort_by: z.string().optional().describe("Column ID to sort by"),
-      limit: limitField,
-      page_token: pageTokenField,
-      value_format: z.enum(["simple", "simpleWithArrays", "rich"]).default("simple")
-        .describe("Value format for row cells"),
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Table ID or name"),
+        query: z.string().optional().describe("Filter rows: 'columnId:value'"),
+        sort_by: z.string().optional().describe("Column ID to sort by"),
+        limit: limitField,
+        page_token: pageTokenField,
+        value_format: z
+          .enum(["simple", "simpleWithArrays", "rich"])
+          .default("simple")
+          .describe("Value format for row cells"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
-  async ({ doc_id, table_id, query, sort_by, limit, page_token, value_format, response_format }) => {
+  async ({
+    doc_id,
+    table_id,
+    query,
+    sort_by,
+    limit,
+    page_token,
+    value_format,
+    response_format,
+  }) => {
     try {
       const data = await codaRequest<{ items: unknown[]; nextPageToken?: string }>(
         `/docs/${doc_id}/tables/${table_id}/rows`,
@@ -526,14 +624,21 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: Row with all column values.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      table_id: z.string().min(1).describe("Table ID or name"),
-      row_id: z.string().min(1).describe("Row ID or name"),
-      value_format: z.enum(["simple", "simpleWithArrays", "rich"]).default("simple"),
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Table ID or name"),
+        row_id: z.string().min(1).describe("Row ID or name"),
+        value_format: z.enum(["simple", "simpleWithArrays", "rich"]).default("simple"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_id, row_id, value_format, response_format }) => {
     try {
@@ -581,23 +686,37 @@ Args:
   - key_columns (array, optional): Column IDs to use as unique keys for upsert matching
 
 Returns: Request ID and number of rows added/updated.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      table_id: z.string().min(1).describe("Base table ID (not a view)"),
-      rows: z.array(
-        z.object({
-          cells: z.array(
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Base table ID (not a view)"),
+        rows: z
+          .array(
             z.object({
-              column: z.string().describe("Column ID (e.g. 'c-ABC123')"),
-              value: z.unknown().describe("Cell value"),
+              cells: z
+                .array(
+                  z.object({
+                    column: z.string().describe("Column ID (e.g. 'c-ABC123')"),
+                    value: z.unknown().describe("Cell value"),
+                  })
+                )
+                .describe("Array of column-value pairs"),
             })
-          ).describe("Array of column-value pairs"),
-        })
-      ).min(1).describe("Rows to insert/update"),
-      key_columns: z.array(z.string()).optional()
-        .describe("Column IDs used as unique keys for upsert matching"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+          )
+          .min(1)
+          .describe("Rows to insert/update"),
+        key_columns: z
+          .array(z.string())
+          .optional()
+          .describe("Column IDs used as unique keys for upsert matching"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_id, rows, key_columns }) => {
     try {
@@ -609,10 +728,12 @@ Returns: Request ID and number of rows added/updated.`,
         payload
       );
       return {
-        content: [{
-          type: "text",
-          text: `✅ ${rows.length} ligne(s) insérée(s)/mise(s) à jour.\n- **Request ID**: ${result["requestId"] ?? "—"}`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: `✅ ${rows.length} ligne(s) insérée(s)/mise(s) à jour.\n- **Request ID**: ${result["requestId"] ?? "—"}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -633,18 +754,28 @@ Args:
   - cells (array): Array of {column, value} pairs to update
 
 Returns: Request ID confirmation.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      table_id: z.string().min(1).describe("Table ID"),
-      row_id: z.string().min(1).describe("Row ID"),
-      cells: z.array(
-        z.object({
-          column: z.string().describe("Column ID"),
-          value: z.unknown().describe("New cell value"),
-        })
-      ).min(1).describe("Cells to update"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Table ID"),
+        row_id: z.string().min(1).describe("Row ID"),
+        cells: z
+          .array(
+            z.object({
+              column: z.string().describe("Column ID"),
+              value: z.unknown().describe("New cell value"),
+            })
+          )
+          .min(1)
+          .describe("Cells to update"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_id, row_id, cells }) => {
     try {
@@ -654,10 +785,12 @@ Returns: Request ID confirmation.`,
         { row: { cells } }
       );
       return {
-        content: [{
-          type: "text",
-          text: `✅ Ligne \`${row_id}\` mise à jour.\n- **Request ID**: ${result["requestId"] ?? "—"}`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Ligne \`${row_id}\` mise à jour.\n- **Request ID**: ${result["requestId"] ?? "—"}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -677,12 +810,19 @@ Args:
   - row_id (string): The row ID to delete
 
 Returns: Confirmation with request ID.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      table_id: z.string().min(1).describe("Table ID"),
-      row_id: z.string().min(1).describe("Row ID to delete"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Table ID"),
+        row_id: z.string().min(1).describe("Row ID to delete"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_id, row_id }) => {
     try {
@@ -691,10 +831,12 @@ Returns: Confirmation with request ID.`,
         "DELETE"
       );
       return {
-        content: [{
-          type: "text",
-          text: `✅ Ligne \`${row_id}\` supprimée.\n- **Request ID**: ${result["requestId"] ?? "—"}`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Ligne \`${row_id}\` supprimée.\n- **Request ID**: ${result["requestId"] ?? "—"}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -717,11 +859,18 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: List of formulas with id, name, and value.`,
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("Coda document ID"),
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, response_format }) => {
     try {
@@ -743,11 +892,17 @@ Returns: List of formulas with id, name, and value.`,
         })
       );
 
-      const text = response_format === ResponseFormat.JSON
-        ? JSON.stringify(formulas, null, 2)
-        : [`# Formules du doc \`${doc_id}\``, "",
-            ...formulas.map(f => `- **${f["name"]}** \`${f["id"]}\` = ${f["value"] !== undefined ? JSON.stringify(f["value"]) : "—"}`)
-          ].join("\n");
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(formulas, null, 2)
+          : [
+              `# Formules du doc \`${doc_id}\``,
+              "",
+              ...formulas.map(
+                (f) =>
+                  `- **${f["name"]}** \`${f["id"]}\` = ${f["value"] !== undefined ? JSON.stringify(f["value"]) : "—"}`
+              ),
+            ].join("\n");
       return { content: [{ type: "text", text: truncate(text) }] };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -767,26 +922,38 @@ Args:
   - response_format: 'markdown' or 'json'
 
 Returns: Matching docs with id, name, browserLink.`,
-    inputSchema: z.object({
-      query: z.string().min(1).describe("Search keyword"),
-      limit: limitField,
-      response_format: responseFormatField,
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        query: z.string().min(1).describe("Search keyword"),
+        limit: limitField,
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ query, limit, response_format }) => {
     try {
-      const data = await codaRequest<{ items: unknown[] }>(
-        "/docs", "GET", undefined, { query, limit }
-      );
+      const data = await codaRequest<{ items: unknown[] }>("/docs", "GET", undefined, {
+        query,
+        limit,
+      });
       const items = data.items as Array<Record<string, unknown>>;
-      if (!items.length) return { content: [{ type: "text", text: `Aucun doc trouvé pour "${query}".` }] };
+      if (!items.length)
+        return { content: [{ type: "text", text: `Aucun doc trouvé pour "${query}".` }] };
 
-      const text = response_format === ResponseFormat.JSON
-        ? JSON.stringify(items, null, 2)
-        : [`# Résultats pour "${query}" (${items.length})`, "",
-            ...items.map(d => `- **${d["name"]}** \`${d["id"]}\` — ${d["browserLink"]}`)
-          ].join("\n");
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(items, null, 2)
+          : [
+              `# Résultats pour "${query}" (${items.length})`,
+              "",
+              ...items.map((d) => `- **${d["name"]}** \`${d["id"]}\` — ${d["browserLink"]}`),
+            ].join("\n");
       return { content: [{ type: "text", text: truncate(text) }] };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -798,13 +965,14 @@ Returns: Matching docs with id, name, browserLink.`,
 // PAGE CONTENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const CODA_DOMAIN = "https://coda.io";
 const MAX_CONTENT_LENGTH = 100_000; // 100KB max pour les écritures
 
 /** Sécurité : vérifie que l'URL appartient bien à coda.io */
 function assertCodaUrl(url: string): void {
   let parsed: URL;
-  try { parsed = new URL(url); } catch {
+  try {
+    parsed = new URL(url);
+  } catch {
     throw new Error("URL invalide.");
   }
   if (parsed.protocol !== "https:" || !parsed.hostname.endsWith("coda.io")) {
@@ -825,14 +993,17 @@ async function fetchPageContentAsMarkdown(doc_id: string, page_id: string): Prom
   // 2. Polling (max 10 tentatives, 3s d'intervalle)
   const maxRetries = 10;
   for (let i = 0; i < maxRetries; i++) {
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     const status = await codaRequest<{ status: string; downloadLink?: string }>(
       `/docs/${doc_id}/pages/${page_id}/export/${requestId}`
     );
     if (status.status === "complete" && status.downloadLink) {
       // 3. Sécurité : valider que le lien de téléchargement est bien sur coda.io
       assertCodaUrl(status.downloadLink);
-      const resp = await axios.get<string>(status.downloadLink, { responseType: "text", timeout: 15000 });
+      const resp = await axios.get<string>(status.downloadLink, {
+        responseType: "text",
+        timeout: 15000,
+      });
       return resp.data;
     }
     if (status.status === "failed") throw new Error("L'export de la page a échoué.");
@@ -845,11 +1016,18 @@ server.registerTool(
   {
     title: "Get Page Content",
     description: "Récupère le contenu complet d'une page Coda au format markdown.",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      page_id: z.string().min(1).describe("ID ou nom de la page"),
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        page_id: z.string().min(1).describe("ID ou nom de la page"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, page_id }) => {
     try {
@@ -866,12 +1044,25 @@ server.registerTool(
   {
     title: "Peek Page",
     description: "Aperçu des premières lignes d'une page Coda (évite de charger tout le contenu).",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      page_id: z.string().min(1).describe("ID ou nom de la page"),
-      num_lines: z.number().int().min(1).max(200).default(30).describe("Nombre de lignes à retourner (défaut 30)"),
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        page_id: z.string().min(1).describe("ID ou nom de la page"),
+        num_lines: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .default(30)
+          .describe("Nombre de lignes à retourner (défaut 30)"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, page_id, num_lines }) => {
     try {
@@ -889,22 +1080,46 @@ server.registerTool(
   {
     title: "Create Page",
     description: "Crée une nouvelle page dans un document Coda, avec contenu markdown optionnel.",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      name: z.string().min(1).max(256).describe("Nom de la page"),
-      content: z.string().max(MAX_CONTENT_LENGTH).optional().describe("Contenu markdown initial (optionnel)"),
-      parent_page_id: z.string().optional().describe("ID de la page parente pour créer une sous-page (optionnel)"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        name: z.string().min(1).max(256).describe("Nom de la page"),
+        content: z
+          .string()
+          .max(MAX_CONTENT_LENGTH)
+          .optional()
+          .describe("Contenu markdown initial (optionnel)"),
+        parent_page_id: z
+          .string()
+          .optional()
+          .describe("ID de la page parente pour créer une sous-page (optionnel)"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, name, content, parent_page_id }) => {
     try {
       const body: Record<string, unknown> = { name };
       if (parent_page_id) body["parentPageId"] = parent_page_id;
-      if (content) body["pageContent"] = { type: "canvas", canvasContent: { format: "markdown", content } };
-      const result = await codaRequest<Record<string, unknown>>(`/docs/${doc_id}/pages`, "POST", body);
+      if (content)
+        body["pageContent"] = { type: "canvas", canvasContent: { format: "markdown", content } };
+      const result = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/pages`,
+        "POST",
+        body
+      );
       return {
-        content: [{ type: "text", text: `✅ Page créée !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}\n- **Lien**: ${result["browserLink"] ?? "—"}` }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Page créée !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}\n- **Lien**: ${result["browserLink"] ?? "—"}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -916,20 +1131,30 @@ server.registerTool(
   "coda_replace_page_content",
   {
     title: "Replace Page Content",
-    description: "Remplace entièrement le contenu d'une page par du markdown. ATTENTION : action irréversible.",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      page_id: z.string().min(1).describe("ID ou nom de la page"),
-      content: z.string().min(1).max(MAX_CONTENT_LENGTH).describe("Nouveau contenu markdown"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    description:
+      "Remplace entièrement le contenu d'une page par du markdown. ATTENTION : action irréversible.",
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        page_id: z.string().min(1).describe("ID ou nom de la page"),
+        content: z.string().min(1).max(MAX_CONTENT_LENGTH).describe("Nouveau contenu markdown"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, page_id, content }) => {
     try {
       await codaRequest(`/docs/${doc_id}/pages/${page_id}`, "PUT", {
         contentUpdate: { insertionMode: "replace", canvasContent: { format: "markdown", content } },
       });
-      return { content: [{ type: "text", text: `✅ Contenu de la page \`${page_id}\` remplacé.` }] };
+      return {
+        content: [{ type: "text", text: `✅ Contenu de la page \`${page_id}\` remplacé.` }],
+      };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
     }
@@ -941,12 +1166,19 @@ server.registerTool(
   {
     title: "Append Page Content",
     description: "Ajoute du contenu markdown à la fin d'une page Coda.",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      page_id: z.string().min(1).describe("ID ou nom de la page"),
-      content: z.string().min(1).max(MAX_CONTENT_LENGTH).describe("Contenu markdown à ajouter"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        page_id: z.string().min(1).describe("ID ou nom de la page"),
+        content: z.string().min(1).max(MAX_CONTENT_LENGTH).describe("Contenu markdown à ajouter"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, page_id, content }) => {
     try {
@@ -965,12 +1197,19 @@ server.registerTool(
   {
     title: "Duplicate Page",
     description: "Duplique une page existante sous un nouveau nom.",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      page_id: z.string().min(1).describe("ID ou nom de la page à dupliquer"),
-      new_name: z.string().min(1).max(256).describe("Nom de la nouvelle page"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        page_id: z.string().min(1).describe("ID ou nom de la page à dupliquer"),
+        new_name: z.string().min(1).max(256).describe("Nom de la nouvelle page"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, page_id, new_name }) => {
     try {
@@ -980,7 +1219,12 @@ server.registerTool(
         pageContent: { type: "canvas", canvasContent: { format: "markdown", content } },
       });
       return {
-        content: [{ type: "text", text: `✅ Page dupliquée !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}` }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Page dupliquée !\n- **ID**: \`${result["id"]}\`\n- **Nom**: ${result["name"]}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -992,18 +1236,29 @@ server.registerTool(
   "coda_resolve_link",
   {
     title: "Resolve Coda Link",
-    description: "Résout une URL Coda (browserLink) en métadonnées : type d'objet, ID doc, ID page, etc.",
-    inputSchema: z.object({
-      url: z.string().url().describe("URL Coda à résoudre (ex: https://coda.io/d/...)"),
-    }).strict(),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "Résout une URL Coda (browserLink) en métadonnées : type d'objet, ID doc, ID page, etc.",
+    inputSchema: z
+      .object({
+        url: z.string().url().describe("URL Coda à résoudre (ex: https://coda.io/d/...)"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ url }) => {
     try {
       // Sécurité : seules les URLs coda.io sont autorisées
       assertCodaUrl(url);
       const data = await codaRequest<Record<string, unknown>>(
-        "/resolveBrowserLink", "GET", undefined, { url }
+        "/resolveBrowserLink",
+        "GET",
+        undefined,
+        { url }
       );
       const text = [
         `# Résolution de lien Coda`,
@@ -1023,13 +1278,25 @@ server.registerTool(
   "coda_delete_rows",
   {
     title: "Delete Multiple Rows",
-    description: "Supprime plusieurs lignes d'une table en une seule opération. Action irréversible.",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      table_id: z.string().min(1).describe("ID ou nom de la table"),
-      row_ids: z.array(z.string().min(1)).min(1).max(100).describe("Liste des IDs de lignes à supprimer (max 100)"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    description:
+      "Supprime plusieurs lignes d'une table en une seule opération. Action irréversible.",
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        table_id: z.string().min(1).describe("ID ou nom de la table"),
+        row_ids: z
+          .array(z.string().min(1))
+          .min(1)
+          .max(100)
+          .describe("Liste des IDs de lignes à supprimer (max 100)"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_id, row_ids }) => {
     try {
@@ -1039,7 +1306,12 @@ server.registerTool(
         { rowIds: row_ids }
       );
       return {
-        content: [{ type: "text", text: `✅ ${row_ids.length} ligne(s) supprimée(s).\n- **Request ID**: ${result["requestId"] ?? "—"}` }],
+        content: [
+          {
+            type: "text",
+            text: `✅ ${row_ids.length} ligne(s) supprimée(s).\n- **Request ID**: ${result["requestId"] ?? "—"}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -1052,13 +1324,20 @@ server.registerTool(
   {
     title: "Push Button",
     description: "Déclenche un bouton Coda sur une ligne spécifique d'une table.",
-    inputSchema: z.object({
-      doc_id: z.string().min(1).describe("ID du document"),
-      table_id: z.string().min(1).describe("ID ou nom de la table"),
-      row_id: z.string().min(1).describe("ID ou nom de la ligne"),
-      column_id: z.string().min(1).describe("ID ou nom de la colonne bouton"),
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("ID du document"),
+        table_id: z.string().min(1).describe("ID ou nom de la table"),
+        row_id: z.string().min(1).describe("ID ou nom de la ligne"),
+        column_id: z.string().min(1).describe("ID ou nom de la colonne bouton"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ doc_id, table_id, row_id, column_id }) => {
     try {
@@ -1067,7 +1346,12 @@ server.registerTool(
         "POST"
       );
       return {
-        content: [{ type: "text", text: `✅ Bouton déclenché.\n- **Request ID**: ${result["requestId"] ?? "—"}` }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Bouton déclenché.\n- **Request ID**: ${result["requestId"] ?? "—"}`,
+          },
+        ],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -1089,6 +1373,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`❌ Erreur fatale: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(
+    `❌ Erreur fatale: ${error instanceof Error ? error.message : String(error)}\n`
+  );
   process.exit(1);
 });
