@@ -14,6 +14,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { registerDocTools } from "./tools/docs.js";
 import { registerPageTools } from "./tools/pages.js";
 import { registerTableTools } from "./tools/tables.js";
+import { registerFormulaTools } from "./tools/formulas.js";
+import { registerActionTools } from "./tools/actions.js";
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +27,8 @@ const server = new McpServer({
 registerDocTools(server);
 registerPageTools(server);
 registerTableTools(server);
+registerFormulaTools(server);
+registerActionTools(server);
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
