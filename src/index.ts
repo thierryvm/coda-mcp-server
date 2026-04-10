@@ -1812,7 +1812,7 @@ Returns: All tables with their columns (id, name, type, formula if calculated, c
         text = JSON.stringify(schemasResult, null, 2);
       } else {
         const lines = [`# Schéma du doc \`${doc_id}\``, ""];
-        for (const tbl of schemasResult) {
+        for (const tbl of schemasResult as Array<Record<string, unknown>>) {
           const cols = tbl["columns"] as Array<Record<string, unknown>>;
           lines.push(`## ${tbl["name"]} \`${tbl["id"]}\` (${tbl["rowCount"] ?? "?"} lignes)`);
           for (const col of cols) {
