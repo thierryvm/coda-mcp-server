@@ -18,7 +18,13 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 
-# The token is passed at runtime, never baked into the image
+# Tokens passed at runtime — never bake secrets into the image
 ENV CODA_API_TOKEN=""
+ENV MCP_ACCESS_TOKEN=""
+ENV MODE="http"
+ENV PORT="3000"
+ENV HOST="0.0.0.0"
+
+EXPOSE 3000
 
 ENTRYPOINT ["node", "dist/index.js"]

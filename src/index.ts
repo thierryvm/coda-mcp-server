@@ -10,6 +10,10 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import { randomUUID } from "crypto";
+import type { Request, Response, NextFunction } from "express";
 import axios from "axios";
 import { z } from "zod";
 import { truncate, handleApiError } from "./utils.js";
@@ -1946,6 +1950,92 @@ Returns: User name, email (loginId), and account type.`,
   }
 );
 
+// ─── HTTP Transport ───────────────────────────────────────────────────────────
+
+async function startHttpServer(): Promise<void> {
+  const mcpToken = process.env.MCP_ACCESS_TOKEN;
+  const port = parseInt(process.env.PORT ?? "3000", 10);
+  const host = process.env.HOST ?? "0.0.0.0";
+
+  const app = createMcpExpressApp({ host });
+
+  // Bearer auth middleware
+  function requireBearer(req: Request, res: Response, next: NextFunction): void {
+    if (mcpToken) {
+      const auth = req.headers["authorization"];
+      if (auth !== `Bearer ${mcpToken}`) {
+        res.status(401).json({
+          jsonrpc: "2.0",
+          error: { code: -32001, message: "Unauthorized" },
+          id: null,
+        });
+        return;
+      }
+    }
+    next();
+  }
+
+  // Single active session — one Claude client at a time
+  let activeSession: { transport: StreamableHTTPServerTransport; id: string } | null = null;
+
+  app.post("/mcp", requireBearer, async (req: Request, res: Response) => {
+    try {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      // Resume existing session
+      if (sessionId && activeSession?.id === sessionId) {
+        await activeSession.transport.handleRequest(req, res, req.body as Record<string, unknown>);
+        return;
+      }
+
+      // New session — close previous if any
+      if (activeSession) {
+        try { await server.close(); } catch { /* ignore */ }
+        activeSession = null;
+      }
+
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => { activeSession = { transport, id }; },
+      });
+      transport.onclose = () => { activeSession = null; };
+
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body as Record<string, unknown>);
+    } catch (e) {
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: e instanceof Error ? e.message : "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
+
+  app.get("/mcp", requireBearer, (_req: Request, res: Response) => {
+    res.status(405).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed." },
+      id: null,
+    });
+  });
+
+  app.get("/health", (_req: Request, res: Response) => {
+    res.json({ status: "ok", version: "2.2.0", transport: "http", tools: 35, auth: !!mcpToken });
+  });
+
+  await new Promise<void>((resolve) => {
+    app.listen(port, host as string, () => {
+      process.stderr.write(`✅ Coda MCP Server v2.2.0 (HTTP) → http://${host}:${port}/mcp\n`);
+      if (!mcpToken) {
+        process.stderr.write("⚠️  MCP_ACCESS_TOKEN non défini — accès non authentifié accepté\n");
+      }
+      resolve();
+    });
+  });
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -1954,9 +2044,16 @@ async function main(): Promise<void> {
     process.stderr.write("   Générer un token sur: https://coda.io/account → API Settings\n");
     process.exit(1);
   }
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  process.stderr.write("✅ Coda MCP Server démarré (stdio)\n");
+
+  const mode = process.env.MODE ?? "stdio";
+
+  if (mode === "http") {
+    await startHttpServer();
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    process.stderr.write("✅ Coda MCP Server démarré (stdio)\n");
+  }
 }
 
 main().catch((error: unknown) => {
