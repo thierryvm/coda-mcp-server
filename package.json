@@ -1,6 +1,6 @@
 {
   "name": "@thierryvm/coda-mcp-server",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "MCP server for Coda.io API — list/read/write docs, pages, tables, rows and formulas",
   "type": "module",
   "main": "dist/index.js",
