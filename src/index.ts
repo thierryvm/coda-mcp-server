@@ -78,7 +78,7 @@ const pageTokenField = z
 
 const server = new McpServer({
   name: "coda-mcp-server",
-  version: "2.1.0",
+  version: "2.2.0",
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -678,7 +678,12 @@ Returns: List of columns with id, name, type, format.`,
         const lines = [`# Colonnes de la table \`${table_id}\``, ""];
         for (const col of items) {
           const fmt = col["format"] as Record<string, unknown> | undefined;
-          lines.push(`- **${col["name"]}** \`${col["id"]}\` — type: ${fmt?.["type"] ?? "—"}`);
+          const calculated = col["calculated"] ? " 🔢" : "";
+          const currency = fmt?.["currencyCode"] ? ` (${fmt["currencyCode"]})` : "";
+          lines.push(`- **${col["name"]}** \`${col["id"]}\`${calculated} — type: ${fmt?.["type"] ?? "—"}${currency}`);
+          if (col["formula"]) {
+            lines.push(`  \`\`\`\n  ${String(col["formula"]).replace(/\n/g, "\n  ")}\n  \`\`\``);
+          }
         }
         text = lines.join("\n");
       }
@@ -1630,6 +1635,269 @@ server.registerTool(
   }
 );
 
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTROLS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "coda_list_controls",
+  {
+    title: "List Coda Controls",
+    description: `List all controls (formula cells, buttons, date pickers, etc.) in a Coda document.
+
+Args:
+  - doc_id (string): The document ID
+  - limit (number): Max controls (default 25)
+  - page_token (string, optional): Pagination token
+  - response_format: 'markdown' or 'json'
+
+Returns: List of controls with id, name, type, formula, browserLink.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        limit: limitField,
+        page_token: pageTokenField,
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, limit, page_token, response_format }) => {
+    try {
+      const data = await codaRequest<{ items: unknown[]; nextPageToken?: string }>(
+        `/docs/${doc_id}/controls`,
+        "GET",
+        undefined,
+        { limit, pageToken: page_token }
+      );
+      const items = data.items as Array<Record<string, unknown>>;
+      if (!items.length) return { content: [{ type: "text", text: "Aucun contrôle trouvé." }] };
+
+      let text: string;
+      if (response_format === ResponseFormat.JSON) {
+        text = JSON.stringify({ items, nextPageToken: data.nextPageToken }, null, 2);
+      } else {
+        const lines = [`# Contrôles du doc \`${doc_id}\` (${items.length})`, ""];
+        if (data.nextPageToken) lines.push(`> page_token: \`${data.nextPageToken}\``, "");
+        for (const c of items) {
+          lines.push(`## ${c["name"]} \`${c["id"]}\``);
+          lines.push(`- **Type**: ${c["controlType"] ?? c["type"] ?? "—"}`);
+          if (c["formula"]) lines.push(`- **Formule**: \`${c["formula"]}\``);
+          if (c["browserLink"]) lines.push(`- **Lien**: ${c["browserLink"]}`);
+          lines.push("");
+        }
+        text = lines.join("\n");
+      }
+      return { content: [{ type: "text", text: truncate(text) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_get_control",
+  {
+    title: "Get Coda Control",
+    description: `Get details of a specific control (formula cell, button, date picker...) in a Coda document.
+
+Args:
+  - doc_id (string): The document ID
+  - control_id (string): The control ID or name
+  - response_format: 'markdown' or 'json'
+
+Returns: Control details including id, name, type, formula, browserLink.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        control_id: z.string().min(1).describe("Control ID or name"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, control_id, response_format }) => {
+    try {
+      const ctrl = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/controls/${control_id}`
+      );
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(ctrl, null, 2)
+          : [
+              `# Contrôle: ${ctrl["name"]}`,
+              `- **ID**: \`${ctrl["id"]}\``,
+              `- **Type**: ${ctrl["controlType"] ?? ctrl["type"] ?? "—"}`,
+              ...(ctrl["formula"] ? [`- **Formule**: \`${ctrl["formula"]}\``] : []),
+              ...(ctrl["browserLink"] ? [`- **Lien**: ${ctrl["browserLink"]}`] : []),
+            ].join("\n");
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCHEMA
+// ═══════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "coda_get_doc_schema",
+  {
+    title: "Get Doc Schema",
+    description: `Get the full schema of a Coda document: all tables with their columns, types, and formulas in a single call.
+
+Equivalent to running coda_list_tables + coda_list_columns for every table at once.
+Especially useful to understand table structure before writing data or debugging formulas.
+
+Args:
+  - doc_id (string): The document ID
+  - response_format: 'markdown' or 'json'
+
+Returns: All tables with their columns (id, name, type, formula if calculated, currency code).`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, response_format }) => {
+    try {
+      // 1. Get all tables
+      const tablesData = await codaRequest<{ items: Array<Record<string, unknown>> }>(
+        `/docs/${doc_id}/tables`,
+        "GET",
+        undefined,
+        { limit: 100 }
+      );
+      const tables = tablesData.items;
+      if (!tables.length) return { content: [{ type: "text", text: "Aucune table trouvée." }] };
+
+      // 2. Fetch columns for each table in parallel
+      const schemasResult = await Promise.all(
+        tables.map(async (t) => {
+          try {
+            const colData = await codaRequest<{ items: Array<Record<string, unknown>> }>(
+              `/docs/${doc_id}/tables/${t["id"]}/columns`
+            );
+            return { ...t, columns: colData.items };
+          } catch {
+            return { ...t, columns: [] };
+          }
+        })
+      );
+
+      let text: string;
+      if (response_format === ResponseFormat.JSON) {
+        text = JSON.stringify(schemasResult, null, 2);
+      } else {
+        const lines = [`# Schéma du doc \`${doc_id}\``, ""];
+        for (const tbl of schemasResult) {
+          const cols = tbl["columns"] as Array<Record<string, unknown>>;
+          lines.push(`## ${tbl["name"]} \`${tbl["id"]}\` (${tbl["rowCount"] ?? "?"} lignes)`);
+          for (const col of cols) {
+            const fmt = col["format"] as Record<string, unknown> | undefined;
+            const calc = col["calculated"] ? " 🔢" : "";
+            const curr = fmt?.["currencyCode"] ? ` ${fmt["currencyCode"]}` : "";
+            lines.push(`  - **${col["name"]}** \`${col["id"]}\`${calc} — ${fmt?.["type"] ?? "—"}${curr}`);
+            if (col["formula"]) {
+              const fmtFormula = String(col["formula"]).replace(/\n\s*/g, " ").slice(0, 120);
+              lines.push(`    → \`${fmtFormula}${String(col["formula"]).length > 120 ? "…" : ""}\``);
+            }
+          }
+          lines.push("");
+        }
+        text = lines.join("\n");
+      }
+      return { content: [{ type: "text", text: truncate(text) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_resolve_uri",
+  {
+    title: "Resolve Coda URI",
+    description: `Parse a coda:// URI (returned by the official Coda MCP) and extract the raw IDs usable with this server.
+
+Supports URIs like:
+  - coda://docs/{docId}
+  - coda://docs/{docId}/pages/{pageId}
+  - coda://docs/{docId}/tables/{tableId}
+  - coda://docs/{docId}/tables/{tableId}/columns/{columnId}
+  - coda://docs/{docId}/tables/{tableId}/rows/{rowId}
+
+Args:
+  - uri (string): A coda:// URI
+
+Returns: Extracted doc_id, table_id, page_id, column_id, row_id (whichever apply).`,
+    inputSchema: z
+      .object({
+        uri: z.string().min(1).describe("coda:// URI to parse"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async ({ uri }) => {
+    try {
+      if (!uri.startsWith("coda://")) {
+        throw new Error("URI must start with coda://");
+      }
+      // Strip fragment (#Name)
+      const clean = uri.split("#")[0];
+      const path = clean.replace("coda://", "");
+      const parts = path.split("/");
+
+      const result: Record<string, string> = {};
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i] === "docs" && parts[i + 1]) result["doc_id"] = parts[i + 1];
+        if (parts[i] === "pages" && parts[i + 1]) result["page_id"] = parts[i + 1];
+        if (parts[i] === "tables" && parts[i + 1]) result["table_id"] = parts[i + 1];
+        if (parts[i] === "columns" && parts[i + 1]) result["column_id"] = parts[i + 1];
+        if (parts[i] === "rows" && parts[i + 1]) result["row_id"] = parts[i + 1];
+        if (parts[i] === "canvases" && parts[i + 1]) result["canvas_id"] = parts[i + 1];
+      }
+
+      const lines = [`# IDs extraits de \`${uri}\``, ""];
+      for (const [k, v] of Object.entries(result)) {
+        lines.push(`- **${k}**: \`${v}\``);
+      }
+      if (!Object.keys(result).length) {
+        lines.push("Aucun ID extrait — vérifiez le format de l'URI.");
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ACCOUNT
