@@ -78,7 +78,7 @@ const pageTokenField = z
 
 const server = new McpServer({
   name: "coda-mcp-server",
-  version: "2.0.0",
+  version: "2.1.0",
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -230,6 +230,87 @@ Returns: New doc ID, name, and browserLink.`,
             text: `✅ Doc créé !\n- **ID**: \`${doc["id"]}\`\n- **Titre**: ${doc["name"]}\n- **Lien**: ${doc["browserLink"]}`,
           },
         ],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+
+server.registerTool(
+  "coda_update_doc",
+  {
+    title: "Update Coda Doc",
+    description: `Update a document's title or icon.
+
+Args:
+  - doc_id (string): The document ID
+  - title (string, optional): New title for the document
+  - icon_name (string, optional): Emoji icon name (e.g. "gear")
+
+Returns: Confirmation with updated doc info.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        title: z.string().min(1).max(256).optional().describe("New document title"),
+        icon_name: z.string().optional().describe("Emoji icon name"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, title, icon_name }) => {
+    try {
+      const payload: Record<string, unknown> = {};
+      if (title) payload["title"] = title;
+      if (icon_name) payload["iconName"] = icon_name;
+      const result = await codaRequest<Record<string, unknown>>(`/docs/${doc_id}`, "PATCH", payload);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `✅ Doc mis à jour !\n- **ID**: \`${result["id"]}\`\n- **Titre**: ${result["name"]}`,
+          },
+        ],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+server.registerTool(
+  "coda_delete_doc",
+  {
+    title: "Delete Coda Doc",
+    description: `Delete a Coda document permanently. THIS ACTION IS IRREVERSIBLE.
+
+Args:
+  - doc_id (string): The document ID to delete
+
+Returns: Confirmation of deletion.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID to delete"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id }) => {
+    try {
+      await codaRequest(`/docs/${doc_id}`, "DELETE");
+      return {
+        content: [{ type: "text", text: `✅ Document \`${doc_id}\` supprimé définitivement.` }],
       };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
@@ -401,6 +482,43 @@ server.registerTool(
   }
 );
 
+
+server.registerTool(
+  "coda_delete_page",
+  {
+    title: "Delete Coda Page",
+    description: `Delete a page from a Coda document permanently. THIS ACTION IS IRREVERSIBLE.
+
+Args:
+  - doc_id (string): The document ID
+  - page_id (string): The page ID or name to delete
+
+Returns: Confirmation of deletion.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        page_id: z.string().min(1).describe("Page ID or name to delete"),
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, page_id }) => {
+    try {
+      await codaRequest(`/docs/${doc_id}/pages/${page_id}`, "DELETE");
+      return {
+        content: [{ type: "text", text: `✅ Page \`${page_id}\` supprimée définitivement.` }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TABLES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -468,6 +586,55 @@ Returns: List of tables with id, name, type, rowCount, browserLink.`,
   }
 );
 
+
+server.registerTool(
+  "coda_get_table",
+  {
+    title: "Get Coda Table",
+    description: `Get metadata for a specific table or view.
+
+Args:
+  - doc_id (string): The document ID
+  - table_id (string): The table ID or name
+  - response_format: 'markdown' or 'json'
+
+Returns: Table metadata including id, name, type, rowCount, browserLink.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Table ID or name"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, table_id, response_format }) => {
+    try {
+      const table = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/tables/${table_id}`
+      );
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(table, null, 2)
+          : [
+              `# Table: ${table["name"]}`,
+              `- **ID**: \`${table["id"]}\``,
+              `- **Type**: ${table["tableType"] ?? table["type"] ?? "—"}`,
+              `- **Lignes**: ${table["rowCount"] ?? "—"}`,
+              `- **Lien**: ${table["browserLink"] ?? "—"}`,
+            ].join("\n");
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
 server.registerTool(
   "coda_list_columns",
   {
@@ -516,6 +683,63 @@ Returns: List of columns with id, name, type, format.`,
         text = lines.join("\n");
       }
       return { content: [{ type: "text", text: truncate(text) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+
+server.registerTool(
+  "coda_get_column",
+  {
+    title: "Get Coda Column",
+    description: `Get detailed information about a specific column, including its formula and format.
+
+Especially useful to inspect calculated column formulas and currency/number format settings.
+
+Args:
+  - doc_id (string): The document ID
+  - table_id (string): The table ID or name
+  - column_id (string): The column ID (e.g. "c-ABC123") or name
+  - response_format: 'markdown' or 'json'
+
+Returns: Column details including id, name, type, format (currency code, precision), formula if calculated.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        table_id: z.string().min(1).describe("Table ID or name"),
+        column_id: z.string().min(1).describe("Column ID (e.g. 'c-ABC123') or name"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, table_id, column_id, response_format }) => {
+    try {
+      const col = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/tables/${table_id}/columns/${column_id}`
+      );
+      const fmt = col["format"] as Record<string, unknown> | undefined;
+      const lines = [
+        `# Colonne: ${col["name"]}`,
+        `- **ID**: \`${col["id"]}\``,
+        `- **Calculée**: ${col["calculated"] ? "Oui" : "Non"}`,
+        `- **Type format**: ${fmt?.["type"] ?? "—"}`,
+      ];
+      if (fmt?.["currencyCode"]) lines.push(`- **Devise**: ${fmt["currencyCode"]}`);
+      if (fmt?.["precision"] !== undefined) lines.push(`- **Précision**: ${fmt["precision"]}`);
+      if (col["formula"]) lines.push(`- **Formule**:\n\`\`\`\n${col["formula"]}\n\`\`\``);
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(col, null, 2)
+          : lines.join("\n");
+      return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
     }
@@ -904,6 +1128,53 @@ Returns: List of formulas with id, name, and value.`,
               ),
             ].join("\n");
       return { content: [{ type: "text", text: truncate(text) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+
+server.registerTool(
+  "coda_get_formula",
+  {
+    title: "Get Coda Formula",
+    description: `Get details of a specific named formula in a Coda document.
+
+Args:
+  - doc_id (string): The document ID
+  - formula_id (string): The formula ID or name
+  - response_format: 'markdown' or 'json'
+
+Returns: Formula name, id, and computed value.`,
+    inputSchema: z
+      .object({
+        doc_id: z.string().min(1).describe("Coda document ID"),
+        formula_id: z.string().min(1).describe("Formula ID or name"),
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ doc_id, formula_id, response_format }) => {
+    try {
+      const formula = await codaRequest<Record<string, unknown>>(
+        `/docs/${doc_id}/formulas/${formula_id}`
+      );
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(formula, null, 2)
+          : [
+              `# Formule: ${formula["name"]}`,
+              `- **ID**: \`${formula["id"]}\``,
+              `- **Valeur**: ${formula["value"] !== undefined ? JSON.stringify(formula["value"]) : "—"}`,
+            ].join("\n");
+      return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
     }
@@ -1353,6 +1624,54 @@ server.registerTool(
           },
         ],
       };
+    } catch (e) {
+      return { content: [{ type: "text", text: handleApiError(e) }] };
+    }
+  }
+);
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACCOUNT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "coda_whoami",
+  {
+    title: "Who Am I (Coda)",
+    description: `Retrieve information about the currently authenticated Coda user.
+
+Useful to verify which account is active and confirm the API token is valid.
+
+Args:
+  - response_format: 'markdown' or 'json'
+
+Returns: User name, email (loginId), and account type.`,
+    inputSchema: z
+      .object({
+        response_format: responseFormatField,
+      })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ response_format }) => {
+    try {
+      const user = await codaRequest<Record<string, unknown>>("/whoami");
+      const text =
+        response_format === ResponseFormat.JSON
+          ? JSON.stringify(user, null, 2)
+          : [
+              `# Utilisateur Coda connecté`,
+              `- **Nom**: ${user["name"] ?? "—"}`,
+              `- **Email**: ${user["loginId"] ?? "—"}`,
+              `- **Type**: ${user["type"] ?? "—"}`,
+            ].join("\n");
+      return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: handleApiError(e) }] };
     }
